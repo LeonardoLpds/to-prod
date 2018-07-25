@@ -1,0 +1,11 @@
+{
+  "name": "to-prod",
+  "version": "1.0.0",
+  "description": "Publica um projeto em produção",
+  "main": "to-prod",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "author": "Leonardo Tigre (leonardo.lpds@gmail.com)",
+  "license": "ISC"
+}
