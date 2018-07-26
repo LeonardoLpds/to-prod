@@ -1,0 +1,53 @@
+#!/usr/bin/env node
+'use strict';
+
+const exec = require('util').promisify(require('child_process').exec);
+const inquirer = require('inquirer');
+const chalk = require('chalk');
+const fs = require('fs');
+
+async function pathQuestions() {
+  return await inquirer.prompt([
+    {
+      type: 'input',
+      name: 'project',
+      message: 'Qual projeto deseja enviar para produção?',
+      default: process.cwd(),
+      validate: value => value.trim() !== '' && fs.existsSync(value)
+    },
+    {
+      type: 'input',
+      name: 'server_folder',
+      message: 'Qual a pasta do projeto no servidor?',
+      default: `/var/www/${process.cwd().substr(process.cwd().lastIndexOf('/')+1)}`,
+      validate: value => value.trim() !== ''
+    },
+    {
+      type: 'input',
+      name: 'tag',
+      message: 'Qual a tag do projeto a ser enviado?',
+      default: await exec('git describe --abbrev=0 --tags || echo "v1.0.0"').then(r=>r.stdout.trim()),
+      validate: value => value.trim() !== ''
+    },
+    {
+      type: 'input',
+      name: 'server',
+      message: 'Para qual servidor o projeto deverá ser enviado?',
+      validate: value => value.trim() !== ''
+    }
+  ]);
+}
+
+async function main() {
+  let paths = await pathQuestions();
+
+  console.log(`\nO projeto ${chalk.green.bold(paths.project)} será enviado para o servidor ${chalk.green.bold(paths.server)}`);
+  let cofirmed = await inquirer.prompt({ type: 'confirm', name: 'cofirmed', message: 'Cofirmar envio?', default: false }).then(r=>r.cofirmed);
+
+  if (!cofirmed) {
+    console.log("Cancelando envio!");
+    return 0;
+  }
+}
+
+main();
