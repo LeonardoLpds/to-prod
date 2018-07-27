@@ -9,7 +9,10 @@
   "author": "Leonardo Tigre (leonardo.lpds@gmail.com)",
   "license": "ISC",
   "dependencies": {
+    "cli-spinner": "^0.2.8",
     "inquirer": "^6.0.0",
-    "node-ssh": "^5.1.2"
+    "node-ssh": "^5.1.2",
+    "simple-git": "^1.96.0",
+    "sshconf": "^2.0.0"
   }
 }

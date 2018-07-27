@@ -1,0 +1,187 @@
+#!/usr/bin/env node
+'use strict';
+
+const exec = require('util').promisify(require('child_process').exec);
+const spawn = require('child_process').spawn;
+const inquirer = require('inquirer');
+const chalk = require('chalk');
+const _ = require('lodash');
+const fs = require('fs');
+const git = require('simple-git/promise');
+const parse = require('sshconf/parse')
+const merge = require('sshconf/merge')
+const hello = require('./hello.js');
+const node_ssh = require('node-ssh');
+const spinner = new require('cli-spinner').Spinner().setSpinnerString(2);
+
+async function main() {
+  hello();
+  let project = await projectQuestions();
+  let zipFile = `${project.path.substr(project.path.lastIndexOf('/')+1)}_${project.tag}.zip`;
+  let starterBranch = await git(project.path).branch().then(b=>b.current);
+
+  await checkoutToTag(project.tag, project.path, starterBranch);
+  await zipProject(project.path, zipFile);
+  await git(project.path).checkout(starterBranch);
+  await deploy(`${project.path}/${zipFile}`, project.server, project.server_folder);
+
+  console.log("Projeto enviado para produção!");
+}
+
+function projectQuestions() {
+  return inquirer.prompt([
+    {
+      type: 'input',
+      name: 'path',
+      message: 'Qual projeto deseja enviar para produção?',
+      default: process.cwd(),
+      validate: value => value.trim() !== '' && fs.existsSync(value)
+    },
+    {
+      type: 'input',
+      name: 'server_folder',
+      message: 'Qual a pasta do projeto no servidor?',
+      default: `/var/www/${process.cwd().substr(process.cwd().lastIndexOf('/')+1)}`,
+      validate: value => value.trim() !== ''
+    },
+    {
+      type: 'input',
+      name: 'tag',
+      message: 'Qual a tag do projeto a ser enviado?',
+      default: async a => await git(a.project).tags().then(r=>r.latest) || 'v1.0.0',
+      validate: value => value.trim() !== ''
+    },
+    {
+      type: 'input',
+      name: 'server',
+      message: 'Para qual servidor o projeto deverá ser enviado?',
+      validate: value => value.trim() !== ''
+    }
+  ]);
+}
+
+async function checkoutToTag(tag, project, branch) {
+  return git(project).checkout(tag)
+  .catch(async e => {
+    await inquirer.prompt({ type: 'confirm', name: 'cofirmed', message: `Deseja criar a tag ${tag}?`, default: true })
+      .then(r=>r.cofirmed || process.exit());
+
+    await createTag(tag, project, branch)
+    return await git(project).checkout(tag)
+  })
+}
+
+async function createTag(tag, project, branch) {
+  return inquirer.prompt([
+    {
+      type: 'input',
+      name: 'msg',
+      message: 'Qual o comentário da tag?',
+      validate: value => value.trim() !== ''
+    },
+    {
+      type: 'confirm',
+      name: 'checkout',
+      message: `Seu branch atual é ${chalk.yellow(branch)}, deseja fazer um checkout para o ${chalk.yellow('master')}?`,
+      default: true,
+      when: () => branch != "master"
+    },
+    {
+      type: 'confirm',
+      name: 'merge',
+      message: `executar um merge?`,
+      default: true,
+      when: a => branch != "master" && a.checkout
+    },
+  ]).then(async a => {
+    if (a.checkout) {
+      await git(project).checkout("master");
+      if (a.merge) {
+        await git(project).merge([branch]);
+      }
+    }
+    return await git(project).addAnnotatedTag(tag, a.msg)
+  });
+}
+
+async function zipProject(project, file) {
+  let exclude="/.git/* /storage/logs/*";
+
+  if (fs.existsSync(`${project}/.gitignore`)) {
+    let gitignore = fs.readFileSync(`${project}/.gitignore`).toString().trim();
+    console.log(`\npor padrão, apenas as pastas ${chalk.yellow(exclude)} serão ${chalk.bold('DESCONSIDERADAS')} no momento do envio`);
+    console.log(`mas você possui um ${chalk.yellow('.gitignore')}`);
+    let ignore = await inquirer.prompt(
+      {
+        type: 'checkbox',
+        message: `Deseja desconsiderar algum dos ignorados pelo git?`,
+        name: 'ignore',
+        choices: JSON.parse(`[{ "name": "${gitignore.replace(/\n/g,'" }, { "name": "')}"}]`)
+      }
+    ).then(r=>r.ignore.join(' '));
+    exclude += ` ${ignore}`;
+  }
+
+  process.stdout.write('\n');
+  spinner.setSpinnerTitle('Zipando projeto %s ');
+  spinner.start()
+  return new Promise((resolve => {
+    var zip = spawn('zip', ['-r', file, './', '-x', exclude], { cwd: project, stdio: 'ignore' });
+    zip.on('close', code => {spinner.stop(); resolve(code)});
+  }));
+}
+
+async function deploy(file, server, server_folder) {
+  let config = await getConfig(server);
+  let ssh = new node_ssh()
+  process.stdout.write('\n');
+  spinner.setSpinnerTitle('Estabelecendo conexão com o servidor %s ');
+  spinner.start()
+  await ssh.connect(config);
+  spinner.stop()
+  process.stdout.write('\n');
+  spinner.setSpinnerTitle('Enviando projeto %s ');
+  spinner.start()
+  await ssh.putFile(file, 'project.zip');
+  spinner.stop()
+  await exec(`rm ${file}`);
+
+  await ssh.exec(`[ -d "${server_folder}" ] && echo true`).then(exists => {
+    if(!exists) {
+      console.log(`Não existe a pasta ${chalk.yellow(server_folder)} no servidor ${chalk.yellow(server)}`);
+      process.exit()
+    }
+  })
+
+  process.stdout.write('\n');
+  spinner.setSpinnerTitle('Descompactando projeto %s ');
+  spinner.start();
+  await ssh.exec(`sudo mv project.zip ${server_folder}/`);
+  await ssh.execCommand(`sudo unzip -o project.zip; sudo rm project.zip`, {cwd: server_folder});
+  spinner.stop();
+  process.stdout.write('\n\n');
+
+  await inquirer.prompt({ type: 'confirm', name: 'cofirmed', message: `Deseja copiar o .env.production?`, default: true })
+      .then(async r=>r.cofirmed && await ssh.execCommand(`sudo cp ".env.production" ".env"; sudo chmod 777 -R storage/ bootstrap/`, {cwd: server_folder}));
+
+  ssh.dispose();
+}
+
+function getConfig(server) {
+  return new Promise(resolve => {
+    fs.createReadStream(`${require('os').homedir()}/.ssh/config`)
+      .pipe(parse())
+      .pipe(merge(function (err, parsed) {
+        let hosts = _.mapKeys(_.find(parsed.hosts, {"Host": [server]}), (value, key) => key.toLowerCase());
+        if (_.isEmpty(hosts)) {
+          console.log(`\nServidor ${server} desconhecido\n`);
+          process.exit()
+        }
+        hosts.host = hosts.host[0];
+        hosts.privateKey = hosts.identityfile.replace('~', require('os').homedir());
+        resolve(hosts)
+      }))
+  })
+}
+
+main();
