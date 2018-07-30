@@ -105,28 +105,26 @@ async function createTag(tag, project, branch) {
 }
 
 async function zipProject(project, file) {
-  let exclude="/.git/* /storage/logs/*";
+  let args = ['-r', file, './', '-x', "/.git/*", "/storage/logs/*"];
 
   if (fs.existsSync(`${project}/.gitignore`)) {
     let gitignore = fs.readFileSync(`${project}/.gitignore`).toString().trim();
-    console.log(`\npor padrão, apenas as pastas ${chalk.yellow(exclude)} serão ${chalk.bold('DESCONSIDERADAS')} no momento do envio`);
-    console.log(`mas você possui um ${chalk.yellow('.gitignore')}`);
     let ignore = await inquirer.prompt(
       {
         type: 'checkbox',
         message: `Deseja desconsiderar algum dos ignorados pelo git?`,
         name: 'ignore',
-        choices: JSON.parse(`[{ "name": "${gitignore.replace(/\n/g,'" }, { "name": "')}"}]`)
+        choices: JSON.parse(`[{ "name": "${gitignore.replace(/\n/g,'*" }, { "name": "')}"}]`)
       }
-    ).then(r=>r.ignore.join(' '));
-    exclude += ` ${ignore}`;
+    ).then(r=>r.ignore);
+    args = args.concat(ignore);
   }
 
   process.stdout.write('\n');
   spinner.setSpinnerTitle('Zipando projeto %s ');
   spinner.start()
   return new Promise((resolve => {
-    var zip = spawn('zip', ['-r', file, './', '-x', exclude], { cwd: project, stdio: 'ignore' });
+    var zip = spawn('zip', args, { cwd: project, stdio: 'ignore' });
     zip.on('close', code => {spinner.stop(); resolve(code)});
   }));
 }
@@ -146,9 +144,10 @@ async function deploy(file, server, server_folder) {
   spinner.stop()
   await exec(`rm ${file}`);
 
-  await ssh.exec(`[ -d "${server_folder}" ] && echo true`).then(exists => {
+  await ssh.exec(`[ -d "${server_folder}" ] && echo true`).then(async exists => {
     if(!exists) {
       console.log(`Não existe a pasta ${chalk.yellow(server_folder)} no servidor ${chalk.yellow(server)}`);
+      await ssh.exec(`rm project.zip`);
       process.exit()
     }
   })
@@ -171,10 +170,10 @@ function getConfig(server) {
   return new Promise(resolve => {
     fs.createReadStream(`${require('os').homedir()}/.ssh/config`)
       .pipe(parse())
-      .pipe(merge(function (err, parsed) {
+      .pipe(merge(async function (err, parsed) {
         let hosts = _.mapKeys(_.find(parsed.hosts, {"Host": [server]}), (value, key) => key.toLowerCase());
         if (_.isEmpty(hosts)) {
-          console.log(`\nServidor ${server} desconhecido\n`);
+          console.log(`\nServidor ${chalk.yellow(server)} desconhecido\nAbortando envio!\n`);
           process.exit()
         }
         hosts.host = hosts.host[0];
